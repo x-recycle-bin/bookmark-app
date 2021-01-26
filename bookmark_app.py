@@ -31,7 +31,10 @@ class BookmarkHTMLParser(HTMLParser):
 
     def handle_data(self, data):
         if self.in_a:
-            self.current_title = data.strip()
+            if self.current_title is None:
+                self.current_title = data.strip()
+            else:
+                self.current_title += " " + data.strip()
 
 class BookmarkApp:
     def __init__(self, root):
@@ -119,13 +122,53 @@ class BookmarkApp:
         idx = self.listbox.curselection()
         if not idx:
             return
-        bm = self.bookmarks[idx[0]]
-        collection = simpledialog.askstring('Add to Collection', 'Enter collection (Study, Work, Shopping):')
-        if collection and collection in self.collections:
-            self.collections[collection].append(bm)
-            self.status.config(text=f'Added to {collection}.')
+        
+        # Get the bookmark depending on the current view
+        selected_text = self.listbox.get(idx[0])
+        if selected_text.startswith('['):
+            # Collection view - extract URL from the display text
+            url_part = selected_text.split(' - ')[-1]
+            bm = None
+            # Find the bookmark in collections
+            for collection_bookmarks in self.collections.values():
+                for bookmark in collection_bookmarks:
+                    if bookmark['url'] == url_part:
+                        bm = bookmark
+                        break
+                if bm:
+                    break
         else:
-            messagebox.showerror('Error', 'Invalid collection name.')
+            # Regular bookmark view
+            if idx[0] < len(self.bookmarks):
+                bm = self.bookmarks[idx[0]]
+            else:
+                messagebox.showerror('Error', 'Invalid bookmark selection.')
+                return
+        
+        if not bm:
+            messagebox.showerror('Error', 'Could not find bookmark.')
+            return
+            
+        # Get available collections or allow creating new ones
+        collection_list = list(self.collections.keys())
+        collection_str = ', '.join(collection_list) if collection_list else 'No collections yet'
+        collection = simpledialog.askstring(
+            'Add to Collection', 
+            f'Enter collection name.\nExisting: {collection_str}'
+        )
+        
+        if collection:
+            if collection not in self.collections:
+                self.collections[collection] = []
+            
+            # Check if bookmark is already in this collection
+            if bm not in self.collections[collection]:
+                self.collections[collection].append(bm)
+                self.status.config(text=f'Added to {collection}.')
+            else:
+                self.status.config(text=f'Bookmark already in {collection}.')
+        else:
+            self.status.config(text='No collection specified.')
 
     def save_collections(self):
         file_path = filedialog.asksaveasfilename(defaultextension='.json', filetypes=[('JSON files', '*.json')])
@@ -154,8 +197,6 @@ class BookmarkApp:
         if not self.api_key:
             messagebox.showerror('Error', 'OpenAI API key not set. Please set it in Settings.')
             return
-        import requests
-        import math
         import json as _json
         # Prepare for batching
         batch_size = 100
@@ -188,11 +229,30 @@ Existing collections:
                             {'role': 'user', 'content': prompt}
                         ],
                         'max_tokens': 1024,
-                        'temperature': 0.2
-                    }
+                        'temperature': 0.2                    }
                 )
                 response.raise_for_status()
-                collections = _json.loads(response.json()['choices'][0]['message']['content'])
+                content = response.json()['choices'][0]['message']['content']
+                # Try to extract JSON from the content if it contains extra text
+                try:
+                    # Look for JSON in the response
+                    json_start = content.find('{')
+                    json_end = content.rfind('}') + 1
+                    if json_start != -1 and json_end > json_start:
+                        json_content = content[json_start:json_end]
+                        new_collections = _json.loads(json_content)
+                    else:
+                        new_collections = _json.loads(content)
+                    
+                    # Merge new collections with existing ones
+                    for collection_name, bookmarks in new_collections.items():
+                        if collection_name not in collections:
+                            collections[collection_name] = []
+                        collections[collection_name].extend(bookmarks)
+                        
+                except _json.JSONDecodeError as json_error:
+                    messagebox.showerror('Error', f'Failed to parse AI response as JSON: {json_error}')
+                    return
                 self.status.config(text=f'AI grouped {end}/{total} bookmarks...')
                 self.status.update_idletasks()
             except Exception as e:
@@ -225,7 +285,6 @@ Existing collections:
         if not self.api_key:
             messagebox.showerror('Error', 'OpenAI API key not set. Please set it in Settings.')
             return
-        import requests
         prompt = f"""
 You are an assistant that classifies bookmarks into learning collections. Given the following bookmark, suggest a suitable collection name (existing or new) that helps the user learn something new. Only return the collection name.
 
