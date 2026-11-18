@@ -193,13 +193,13 @@ bookmarks are uncategorized and nested folders retain their full path.
 
 ### 10. Isolate AI configuration and transport
 
-- [ ] Replace direct API calls in UI methods with an AI service interface that
+- [x] Replace direct API calls in UI methods with an AI service interface that
   can be tested independently.
-- [ ] Keep the API key out of source, logs, exported files, and JSON backups.
-- [ ] Document temporary runtime configuration and, if persistent storage is
+- [x] Keep the API key out of source, logs, exported files, and JSON backups.
+- [x] Document temporary runtime configuration and, if persistent storage is
   offered, use the operating system's credential manager.
-- [ ] Configure model, endpoint, timeout, and batch size in one place.
-- [ ] Add retry limits for transient responses without duplicating bookmarks
+- [x] Configure model, endpoint, timeout, and batch size in one place.
+- [x] Add retry limits for transient responses without duplicating bookmarks
   after a partial success.
 
 **Acceptance criteria**
@@ -210,15 +210,15 @@ bookmarks are uncategorized and nested folders retain their full path.
 
 ### 11. Restore safe, batched AI grouping
 
-- [ ] Validate the API response against a strict expected schema before
+- [x] Validate the API response against a strict expected schema before
   changing bookmark folders.
-- [ ] Classify every input bookmark exactly once, or explicitly report
+- [x] Classify every input bookmark exactly once, or explicitly report
   unclassified items.
-- [ ] Keep existing folder assignments and the Bookmarks bar policy in the
+- [x] Keep existing folder assignments and the Bookmarks bar policy in the
   prompt and merge result.
-- [ ] Report per-batch progress, failures, retryable items, and a final summary.
-- [ ] Run AI grouping outside the Tkinter thread and support cancellation.
-- [ ] Require preview and confirmation before replacing the active folder
+- [x] Report per-batch progress, failures, retryable items, and a final summary.
+- [x] Run AI grouping outside the Tkinter thread and support cancellation.
+- [x] Require preview and confirmation before replacing the active folder
   structure.
 
 **Acceptance criteria**
@@ -229,10 +229,10 @@ bookmarks are uncategorized and nested folders retain their full path.
 
 ### 12. Restore AI-assisted single-bookmark addition
 
-- [ ] Validate title and URL before classification.
-- [ ] Preview the suggested folder and let the user confirm or override it.
-- [ ] Use the same folder normalization and duplicate policy as bulk grouping.
-- [ ] Allow ordinary manual addition when AI is unavailable.
+- [x] Validate title and URL before classification.
+- [x] Preview the suggested folder and let the user confirm or override it.
+- [x] Use the same folder normalization and duplicate policy as bulk grouping.
+- [x] Allow ordinary manual addition when AI is unavailable.
 
 **Acceptance criteria**
 

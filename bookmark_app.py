@@ -5,6 +5,7 @@ import threading
 import json
 import os
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from html import escape
@@ -86,6 +87,209 @@ class UrlCheckResult:
     bookmark: Bookmark
     outcome: str
     detail: str
+
+
+@dataclass(frozen=True)
+class AiConfig:
+    api_key: str
+    endpoint: str = 'https://api.openai.com/v1/chat/completions'
+    model: str = 'gpt-4o-mini'
+    timeout: float = 30
+    batch_size: int = 50
+    retries: int = 2
+
+    @classmethod
+    def from_environment(cls):
+        return cls(
+            api_key=os.environ.get('OPENAI_API_KEY', '').strip(),
+            endpoint=os.environ.get(
+                'BOOKMARK_AI_ENDPOINT',
+                'https://api.openai.com/v1/chat/completions',
+            ).strip(),
+            model=os.environ.get(
+                'BOOKMARK_AI_MODEL',
+                'gpt-4o-mini',
+            ).strip(),
+            timeout=float(os.environ.get('BOOKMARK_AI_TIMEOUT', '30')),
+            batch_size=int(os.environ.get('BOOKMARK_AI_BATCH_SIZE', '50')),
+            retries=int(os.environ.get('BOOKMARK_AI_RETRIES', '2')),
+        )
+
+    def __post_init__(self):
+        if not self.endpoint:
+            raise ValueError('AI endpoint cannot be empty.')
+        if not self.model:
+            raise ValueError('AI model cannot be empty.')
+        if self.timeout <= 0 or self.batch_size <= 0 or self.retries < 0:
+            raise ValueError('AI timeout, batch size, and retries are invalid.')
+
+    def with_key(self, api_key):
+        return AiConfig(
+            api_key=api_key.strip(),
+            endpoint=self.endpoint,
+            model=self.model,
+            timeout=self.timeout,
+            batch_size=self.batch_size,
+            retries=self.retries,
+        )
+
+
+class AiResponseError(ValueError):
+    pass
+
+
+class AiOrganizer:
+    def __init__(self, config, session=None):
+        self.config = config
+        self.session = session or requests.Session()
+
+    def classify_batch(self, bookmarks, existing_folder_paths):
+        if not self.config.api_key:
+            raise ValueError('An AI API key is required.')
+        request_items = [
+            {
+                'assignment_key': bookmark.assignment_key,
+                'title': bookmark.title,
+                'url': bookmark.url,
+            }
+            for bookmark in bookmarks
+        ]
+        prompt = (
+            'Classify each bookmark into one useful folder. '
+            'Return only JSON with shape '
+            '{"assignments":[{"assignment_key":"...","folder":"Folder Name"}]}. '
+            'Every assignment_key from bookmarks must appear exactly once. '
+            'Folder names must be concise, non-empty strings. '
+            'Existing folders may be reused.\n'
+            f'Existing folders: {json.dumps(existing_folder_paths)}\n'
+            f'Bookmarks: {json.dumps(request_items)}'
+        )
+
+        content = self._request_content(prompt)
+        payload = self._parse_json_content(content)
+        return self._validate_assignments(payload, bookmarks)
+
+    def suggest_folder(self, bookmark, existing_folder_paths):
+        assignments = self.classify_batch([bookmark], existing_folder_paths)
+        return assignments[bookmark.assignment_key]
+
+    def _request_content(self, prompt):
+        last_error = None
+        for attempt in range(self.config.retries + 1):
+            try:
+                response = self.session.post(
+                    self.config.endpoint,
+                    headers={
+                        'Authorization': f'Bearer {self.config.api_key}',
+                        'Content-Type': 'application/json',
+                    },
+                    json={
+                        'model': self.config.model,
+                        'temperature': 0.1,
+                        'messages': [
+                            {
+                                'role': 'system',
+                                'content': (
+                                    'You classify bookmarks and return only '
+                                    'strict JSON.'
+                                ),
+                            },
+                            {'role': 'user', 'content': prompt},
+                        ],
+                    },
+                    timeout=self.config.timeout,
+                )
+                status_code = response.status_code
+                if (
+                    status_code in {408, 429}
+                    or isinstance(status_code, int) and status_code >= 500
+                ):
+                    last_error = AiResponseError(
+                        f'AI service returned HTTP {status_code}.'
+                    )
+                    if attempt < self.config.retries:
+                        time.sleep(0.25 * (2 ** attempt))
+                        continue
+                    break
+                response.raise_for_status()
+                response_json = response.json()
+                return response_json['choices'][0]['message']['content']
+            except (requests.Timeout, requests.ConnectionError) as error:
+                last_error = error
+                if attempt < self.config.retries:
+                    time.sleep(0.25 * (2 ** attempt))
+                    continue
+                break
+            except (requests.RequestException, KeyError, IndexError, TypeError) as error:
+                raise AiResponseError(
+                    f'AI request failed: {error.__class__.__name__}.'
+                ) from error
+            except (ValueError, json.JSONDecodeError) as error:
+                raise AiResponseError('AI service returned invalid JSON.') from error
+
+        message = (
+            f'AI request failed after {self.config.retries + 1} attempts: '
+            f'{last_error.__class__.__name__}.'
+        )
+        if isinstance(last_error, AiResponseError):
+            message = str(last_error)
+        raise AiResponseError(message)
+
+    @staticmethod
+    def _parse_json_content(content):
+        if not isinstance(content, str):
+            raise AiResponseError('AI response content must be text.')
+        stripped = content.strip()
+        if stripped.startswith('```'):
+            lines = stripped.splitlines()
+            if lines and lines[0].startswith('```'):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == '```':
+                lines = lines[:-1]
+            stripped = '\n'.join(lines).strip()
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError as error:
+            raise AiResponseError('AI response was not strict JSON.') from error
+
+    @staticmethod
+    def _validate_assignments(payload, bookmarks):
+        if not isinstance(payload, dict) or set(payload) != {'assignments'}:
+            raise AiResponseError(
+                'AI response must contain only an assignments array.'
+            )
+        assignments = payload['assignments']
+        if not isinstance(assignments, list):
+            raise AiResponseError('AI assignments must be an array.')
+
+        expected = {bookmark.assignment_key for bookmark in bookmarks}
+        result = {}
+        for item in assignments:
+            if not isinstance(item, dict) or set(item) != {
+                'assignment_key',
+                'folder',
+            }:
+                raise AiResponseError('AI assignment objects are invalid.')
+            key = item['assignment_key']
+            folder = item['folder']
+            if not isinstance(key, str) or key not in expected:
+                raise AiResponseError(
+                    'AI response contains an unknown assignment key.'
+                )
+            if key in result:
+                raise AiResponseError(
+                    'AI response contains a duplicate assignment key.'
+                )
+            if not isinstance(folder, str) or not folder.strip():
+                raise AiResponseError('AI folder names cannot be empty.')
+            result[key] = folder.strip()
+
+        if set(result) != expected:
+            missing = len(expected - set(result))
+            raise AiResponseError(
+                f'AI response omitted {missing} bookmark assignment(s).'
+            )
+        return result
 
 
 @dataclass
@@ -272,6 +476,56 @@ class BookmarkStore:
             ):
                 return path
         raise ValueError('Bookmark no longer exists.')
+
+    def protected_bookmark_keys(self):
+        protected = set()
+        for folder in self.folders:
+            if not any(
+                location[1].is_bookmarks_bar
+                for location in folder.iter_folders()
+            ):
+                continue
+            for location in folder.iter_folders():
+                path_folder = location[1]
+                if path_folder.is_bookmarks_bar:
+                    protected.update(
+                        bookmark.assignment_key
+                        for bookmark in path_folder.iter_bookmarks()
+                    )
+        return protected
+
+    def has_normalized_url(self, url):
+        normalized = normalize_bookmark_url(url)
+        return any(
+            normalize_bookmark_url(bookmark.url) == normalized
+            for bookmark in self.bookmarks
+        )
+
+    def ensure_folder_path(self, parts):
+        if not parts:
+            return ()
+        clean_parts = []
+        for part in parts:
+            name = part.strip()
+            if not name:
+                raise ValueError('AI folder paths cannot contain empty names.')
+            clean_parts.append(name)
+        if clean_parts and any(
+            folder.is_bookmarks_bar and folder.name.casefold() == clean_parts[0].casefold()
+            for folder in self.folders
+        ):
+            raise ValueError('AI cannot move bookmarks into the Bookmarks bar.')
+
+        path = ()
+        for index, name in enumerate(clean_parts):
+            current = path + (name,)
+            folder = self.find_folder(current)
+            if folder is None:
+                folder = self.create_folder(name, path)
+            if folder.is_bookmarks_bar and index >= 0:
+                raise ValueError('AI cannot use the Bookmarks bar.')
+            path = current
+        return path
 
     def duplicate_groups(self):
         groups = {}
@@ -621,6 +875,13 @@ class BookmarkApp:
         self._ui_poll_id = None
         self._active_background_tasks = 0
         self._cancel_url_check = threading.Event()
+        self._cancel_ai = threading.Event()
+        self._ai_config_error = None
+        try:
+            self.ai_config = AiConfig.from_environment()
+        except ValueError as error:
+            self.ai_config = AiConfig(api_key='')
+            self._ai_config_error = str(error)
         self.root.minsize(700, 360)
         self.root.geometry('900x500')
         self.create_widgets()
@@ -711,6 +972,31 @@ class BookmarkApp:
             command=self.cancel_url_check
         )
         self.cancel_check_btn.pack(side=tk.LEFT, padx=5)
+        self.settings_btn = tk.Button(
+            toolbar,
+            text='AI Settings',
+            command=self.configure_ai
+        )
+        self.settings_btn.pack(side=tk.LEFT, padx=5)
+        self.ai_group_btn = tk.Button(
+            toolbar,
+            text='AI Group',
+            command=self.ai_group_bookmarks
+        )
+        self.ai_group_btn.pack(side=tk.LEFT, padx=5)
+        self.cancel_ai_btn = tk.Button(
+            toolbar,
+            text='Cancel AI',
+            state=tk.DISABLED,
+            command=self.cancel_ai_grouping
+        )
+        self.cancel_ai_btn.pack(side=tk.LEFT, padx=5)
+        self.add_bookmark_btn = tk.Button(
+            toolbar,
+            text='Add Bookmark',
+            command=self.add_bookmark
+        )
+        self.add_bookmark_btn.pack(side=tk.LEFT, padx=5)
         self._action_buttons = [
             self.import_btn,
             self.save_btn,
@@ -722,7 +1008,27 @@ class BookmarkApp:
             self.move_bookmark_btn,
             self.duplicates_btn,
             self.check_urls_btn,
+            self.settings_btn,
+            self.ai_group_btn,
+            self.add_bookmark_btn,
         ]
+        toolbar_buttons = [
+            *self._action_buttons,
+            self.cancel_check_btn,
+            self.cancel_ai_btn,
+        ]
+        for button in toolbar_buttons:
+            button.pack_forget()
+        for index, button in enumerate(toolbar_buttons):
+            row, column = divmod(index, 6)
+            button.grid(
+                row=row,
+                column=column,
+                sticky=tk.EW,
+                padx=3,
+                pady=2
+            )
+            toolbar.columnconfigure(column, weight=1)
 
         content = ttk.Panedwindow(frame, orient=tk.HORIZONTAL)
         content.grid(row=1, column=0, sticky=tk.NSEW)
@@ -778,6 +1084,10 @@ class BookmarkApp:
         self._tree_bookmark_keys = {}
         self._listbox_bookmark_keys = []
         self.refresh_bookmark_views()
+        if self._ai_config_error:
+            self.status.config(
+                text=f'AI environment configuration ignored: {self._ai_config_error}'
+            )
 
     def import_bookmarks(self):
         file_path = filedialog.askopenfilename(filetypes=[('HTML files', '*.html')])
@@ -1262,6 +1572,299 @@ class BookmarkApp:
         self.cancel_check_btn.config(state=tk.DISABLED)
         self._set_busy(False)
         self._report_background_error(error)
+
+    def configure_ai(self):
+        api_key = simpledialog.askstring(
+            'AI Settings',
+            'Enter the API key for this session.\n'
+            'Leave blank to keep the current key or use OPENAI_API_KEY.',
+            show='*'
+        )
+        if api_key is None:
+            return
+        endpoint = simpledialog.askstring(
+            'AI Settings',
+            'OpenAI-compatible endpoint:',
+            initialvalue=self.ai_config.endpoint
+        )
+        if endpoint is None:
+            return
+        model = simpledialog.askstring(
+            'AI Settings',
+            'Model:',
+            initialvalue=self.ai_config.model
+        )
+        if model is None:
+            return
+        batch_size = simpledialog.askinteger(
+            'AI Settings',
+            'Bookmarks per batch:',
+            initialvalue=self.ai_config.batch_size,
+            minvalue=1,
+            maxvalue=200
+        )
+        if batch_size is None:
+            return
+
+        selected_key = api_key.strip() or self.ai_config.api_key
+        try:
+            self.ai_config = AiConfig(
+                api_key=selected_key,
+                endpoint=endpoint.strip(),
+                model=model.strip(),
+                timeout=self.ai_config.timeout,
+                batch_size=batch_size,
+                retries=self.ai_config.retries,
+            )
+        except ValueError as error:
+            messagebox.showerror('AI Settings', str(error))
+            return
+        self.status.config(
+            text=(
+                'AI settings updated for this session.'
+                if self.ai_config.api_key
+                else 'AI settings saved; API key is still required.'
+            )
+        )
+
+    def ai_group_bookmarks(self):
+        if not self.ai_config.api_key:
+            messagebox.showerror(
+                'AI Grouping',
+                'Set OPENAI_API_KEY or configure an API key in AI Settings.'
+            )
+            return
+        protected = self.store.protected_bookmark_keys()
+        bookmarks = [
+            bookmark
+            for bookmark in self.bookmarks
+            if bookmark.assignment_key not in protected
+        ]
+        if not bookmarks:
+            messagebox.showinfo(
+                'AI Grouping',
+                'There are no bookmarks available outside the Bookmarks bar.'
+            )
+            return
+
+        service = AiOrganizer(self.ai_config)
+        source_store = BookmarkStore.from_dict(self.store.to_dict())
+        folder_paths = [
+            ' / '.join(path)
+            for path in source_store.folder_paths
+            if not self._is_protected_folder_path(path, source_store)
+        ]
+        self._cancel_ai.clear()
+        self._set_busy(True, 'AI grouping started...')
+        self.cancel_ai_btn.config(state=tk.NORMAL)
+
+        def worker(report_progress):
+            assignments = {}
+            failures = []
+            batches = [
+                bookmarks[start:start + self.ai_config.batch_size]
+                for start in range(
+                    0,
+                    len(bookmarks),
+                    self.ai_config.batch_size
+                )
+            ]
+            for index, batch in enumerate(batches, start=1):
+                if self._cancel_ai.is_set():
+                    break
+                try:
+                    assignments.update(
+                        service.classify_batch(batch, folder_paths)
+                    )
+                except (AiResponseError, ValueError) as error:
+                    failures.append((index, error))
+                report_progress((index, len(batches), len(assignments)))
+            return source_store, assignments, failures, self._cancel_ai.is_set()
+
+        self.run_background(
+            worker,
+            on_success=self._preview_ai_grouping,
+            on_error=self._ai_grouping_failed,
+            on_progress=lambda progress: self.status.config(
+                text=(
+                    f'AI grouping batch {progress[0]}/{progress[1]}: '
+                    f'{progress[2]} classified.'
+                )
+            ),
+        )
+
+    def cancel_ai_grouping(self):
+        self._cancel_ai.set()
+        self.cancel_ai_btn.config(state=tk.DISABLED)
+        self.status.config(text='Canceling AI grouping...')
+
+    def _preview_ai_grouping(self, payload):
+        proposed_store, assignments, failures, cancelled = payload
+        self.cancel_ai_btn.config(state=tk.DISABLED)
+        self._set_busy(False)
+        if cancelled and not assignments:
+            self.status.config(text='AI grouping canceled before classification.')
+            return
+
+        failed_summary = ''
+        if failures:
+            failed_batches = ', '.join(
+                f'{index}: {error.__class__.__name__}'
+                for index, error in failures
+            )
+            failed_summary = (
+                f'\n{len(failures)} batch(es) failed and will remain in their '
+                f'current folders.\nFailed batches: {failed_batches}.'
+            )
+        try:
+            for assignment_key, folder_name in assignments.items():
+                parts = tuple(
+                    part.strip()
+                    for part in folder_name.split(' / ')
+                )
+                destination = proposed_store.ensure_folder_path(parts)
+                proposed_store.move_bookmark(assignment_key, destination)
+        except ValueError as error:
+            self._report_background_error(
+                AiResponseError(f'Cannot apply AI folder proposal: {error}')
+            )
+            return
+
+        proposed_store.validate()
+        classified = len(assignments)
+        preview = (
+            f'AI classified {classified} bookmark(s).'
+            f'{failed_summary}\n\n'
+            f'Preview folders:\n'
+            + '\n'.join(
+                f'- {" / ".join(path)} ({len(folder.bookmarks)})'
+                for path, folder in proposed_store._iter_folder_locations()
+            )
+        )
+        if len(preview) > 3000:
+            preview = preview[:3000] + '\n...'
+        if messagebox.askyesno(
+            'Review AI Organization',
+            preview + '\n\nApply this organization?'
+        ):
+            self.store = proposed_store
+            self.refresh_bookmark_views()
+            self.status.config(
+                text=f'Applied AI grouping to {classified} bookmark(s).'
+            )
+        else:
+            self.status.config(text='AI grouping proposal was not applied.')
+
+    def _ai_grouping_failed(self, error):
+        self.cancel_ai_btn.config(state=tk.DISABLED)
+        self._set_busy(False)
+        self._report_background_error(error)
+
+    @staticmethod
+    def _is_protected_folder_path(path, store):
+        return any(
+            (folder := store.find_folder(path[:index])) is not None
+            and folder.is_bookmarks_bar
+            for index in range(1, len(path) + 1)
+        )
+
+    def add_bookmark(self):
+        title = simpledialog.askstring('Add Bookmark', 'Bookmark title:')
+        if title is None:
+            return
+        url = simpledialog.askstring('Add Bookmark', 'Bookmark URL:')
+        if url is None:
+            return
+        title = title.strip()
+        url = url.strip()
+        try:
+            bookmark = Bookmark(title=title, url=url)
+            parsed = urlsplit(url)
+            if parsed.scheme.lower() not in {'http', 'https'} or not parsed.netloc:
+                raise ValueError('Bookmark URL must start with http:// or https://.')
+        except ValueError as error:
+            messagebox.showerror('Add Bookmark', str(error))
+            return
+
+        if self.store.has_normalized_url(url) and not messagebox.askyesno(
+            'Possible Duplicate',
+            'A bookmark with a matching URL already exists. Add another copy?'
+        ):
+            return
+
+        if self.ai_config.api_key and messagebox.askyesno(
+            'AI Folder Suggestion',
+            'Ask AI for a folder suggestion?'
+        ):
+            service = AiOrganizer(self.ai_config)
+            self._set_busy(True, 'Getting AI folder suggestion...')
+
+            def worker(report_progress):
+                report_progress('Classifying bookmark...')
+                return service.suggest_folder(
+                    bookmark,
+                    [
+                        ' / '.join(path)
+                        for path in self.store.folder_paths
+                        if not self._is_protected_folder_path(
+                            path, self.store
+                        )
+                    ],
+                )
+
+            self.run_background(
+                worker,
+                on_success=lambda suggestion: self._choose_bookmark_destination(
+                    bookmark,
+                    suggestion
+                ),
+                on_error=lambda error: self._ai_add_failed(bookmark, error),
+                on_progress=lambda message: self.status.config(text=message),
+            )
+            return
+        self._choose_bookmark_destination(bookmark)
+
+    def _ai_add_failed(self, bookmark, error):
+        self._set_busy(False)
+        messagebox.showerror(
+            'AI Suggestion Failed',
+            f'{error}\nThe bookmark is still available to add manually.'
+        )
+        self._choose_bookmark_destination(bookmark)
+
+    def _choose_bookmark_destination(self, bookmark, suggested_folder=''):
+        self._set_busy(False)
+
+        choices = ['Uncategorized'] + [
+            ' / '.join(path)
+            for path in self.store.folder_paths
+            if not self._is_protected_folder_path(path, self.store)
+        ]
+        destination = simpledialog.askstring(
+            'Add Bookmark',
+            (
+                'Choose a folder path, or enter a new folder name.\n'
+                'Existing choices:\n' + '\n'.join(choices)
+            ),
+            initialvalue=suggested_folder or 'Uncategorized'
+        )
+        if destination is None:
+            return
+        destination = destination.strip()
+        try:
+            if destination == 'Uncategorized':
+                self.store.uncategorized.append(bookmark)
+            else:
+                path = self.store.ensure_folder_path(
+                    tuple(part.strip() for part in destination.split(' / '))
+                )
+                self.store.find_folder(path).bookmarks.append(bookmark)
+            self.store.validate()
+        except ValueError as error:
+            messagebox.showerror('Add Bookmark', str(error))
+            return
+        self.refresh_bookmark_views()
+        self.status.config(text=f'Added "{bookmark.title}".')
 
     def _list_double_click(self, event):
         del event

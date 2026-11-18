@@ -85,10 +85,24 @@ unless you change them manually.
 
 ### AI Features (Optional)
 To use AI-powered bookmark organization:
-1. Get an OpenAI API key from [OpenAI Platform](https://platform.openai.com/)
-2. Click "Settings" in the application
-3. Enter your API key
-4. Use "AI Group Bookmarks" for automatic categorization
+1. Provide an OpenAI-compatible API key using the `OPENAI_API_KEY`
+   environment variable, or click **AI Settings** for session-only
+   configuration.
+2. Optionally configure:
+   - `BOOKMARK_AI_ENDPOINT`
+   - `BOOKMARK_AI_MODEL`
+   - `BOOKMARK_AI_TIMEOUT`
+   - `BOOKMARK_AI_BATCH_SIZE`
+   - `BOOKMARK_AI_RETRIES`
+3. Click **AI Group**, review the proposed folders, and confirm before
+   applying them.
+4. **Add Bookmark** also offers an optional AI folder suggestion. If AI is
+   unavailable, the bookmark can still be assigned manually.
+
+API keys are kept only in process memory or read from the environment. They
+are not written to bookmark exports, JSON backups, logs, or repository files.
+AI requests run in the background; the Bookmarks bar is excluded from
+classification.
 
 ### Folder Organization
 The app organizes bookmarks into logical folders such as:
@@ -106,16 +120,16 @@ The app organizes bookmarks into logical folders such as:
 bookmark-app/
 ├── bookmark_app.py              # Main application
 ├── requirements.txt             # Python dependencies
-├── bookmarks_6_12_25_2.html    # Sample bookmark file
-├── test_complete_workflow.py    # Comprehensive test suite
+├── short_bookmarks.html         # Sample bookmark file
+├── test_*.py                    # Offline unit and GUI smoke tests
 └── README.md                    # This file
 ```
 
 ## 🧪 Testing
 
-Run the complete workflow test:
+Run the complete test suite:
 ```bash
-py test_complete_workflow.py
+py -m unittest discover -v
 ```
 
 This test demonstrates:
