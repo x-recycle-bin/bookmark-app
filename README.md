@@ -15,13 +15,13 @@ A powerful Python application for organizing and managing browser bookmarks with
 - **Intelligent Naming**: AI suggests meaningful folder names
 
 ### 🔧 Management Tools
-- **URL Validation**: Check and remove dead links
-- **Manual Organization**: Drag-and-drop bookmark management
+- **URL Validation**: Check links concurrently and review failed URLs before removal
+- **Manual Organization**: Move bookmarks by double-click or the Move Bookmark control
 - **Folder Management**: Create, rename, and organize bookmark folders
 - **Duplicate Detection**: Identify and handle duplicate bookmarks
 
 ### 🎯 Special Features
-- **Bookmarks Bar Exclusion**: Automatically excludes "Bookmarks bar" folder from sorting
+- **Bookmarks Bar Protection**: Preserves the "Bookmarks bar" during organization and export
 - **Multi-format Support**: Works with bookmarks from Chrome, Firefox, Safari, Edge
 - **Clean Export**: Generates properly formatted HTML for seamless browser import
 
@@ -66,13 +66,20 @@ Export your current bookmarks:
 1. Open Bookmark Organizer
 2. Click "Import Bookmarks" and select your HTML file
 3. Review imported bookmarks
-4. Use AI grouping or manual organization to create folders
-5. The app automatically excludes "Bookmarks bar" from organization
+4. Create or rename folders and double-click a bookmark to move it
+5. Use Duplicates to choose how matching URLs are handled
+6. The Bookmarks bar remains visible and cannot be renamed or deleted
 
 ### Step 3: Export & Import
 1. Click "Export HTML" to generate organized bookmark file
 2. In your browser, import the organized file
 3. Enjoy your clean, categorized bookmarks!
+
+Before export, **Check URLs** follows redirects up to the request library's
+configured limit and reports reachable, redirected, invalid, client-error,
+server-error, timeout, and network-error results. Only invalid URLs and client
+errors are offered for deletion; timeouts and server/network failures are kept
+unless you change them manually.
 
 ## 🔧 Configuration
 
@@ -115,7 +122,7 @@ This test demonstrates:
 - ✅ HTML bookmark parsing (105 bookmarks processed)
 - ✅ Smart categorization into 6 folders
 - ✅ Browser-compatible HTML export
-- ✅ Proper exclusion of "Bookmarks bar" folder
+- ✅ Preservation of the "Bookmarks bar" folder and its hierarchy
 - ✅ File validation and verification
 
 ## 🌟 Key Benefits
