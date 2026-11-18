@@ -87,9 +87,10 @@ unless you change them manually.
 To use AI-powered bookmark organization:
 1. Provide an OpenAI-compatible API key using the `OPENAI_API_KEY`
    environment variable, or click **AI Settings** for session-only
-   configuration.
+   configuration. The key requires `api.agents.read`, `api.agents.write`,
+   and `api.responses.write` access.
 2. Optionally configure:
-   - `BOOKMARK_AI_ENDPOINT`
+   - `BOOKMARK_AI_ENDPOINT` (API base URL, not a Chat Completions URL)
    - `BOOKMARK_AI_MODEL`
    - `BOOKMARK_AI_TIMEOUT`
    - `BOOKMARK_AI_BATCH_SIZE`
@@ -98,6 +99,10 @@ To use AI-powered bookmark organization:
    applying them.
 4. **Add Bookmark** also offers an optional AI folder suggestion. If AI is
    unavailable, the bookmark can still be assigned manually.
+5. Click **Sort Dates** to classify links from `Даты`/`Dates` and all nested
+   date subfolders into existing folders outside that tree. AI cannot create
+   destination folders in this mode, and the result still requires preview and
+   confirmation.
 
 API keys are kept only in process memory or read from the environment. They
 are not written to bookmark exports, JSON backups, logs, or repository files.

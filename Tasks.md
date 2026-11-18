@@ -193,8 +193,8 @@ bookmarks are uncategorized and nested folders retain their full path.
 
 ### 10. Isolate AI configuration and transport
 
-- [x] Replace direct API calls in UI methods with an AI service interface that
-  can be tested independently.
+- [x] Replace direct API calls with the Python OpenAI Agents API client and an
+  independently testable AI service interface.
 - [x] Keep the API key out of source, logs, exported files, and JSON backups.
 - [x] Document temporary runtime configuration and, if persistent storage is
   offered, use the operating system's credential manager.
@@ -238,6 +238,15 @@ bookmarks are uncategorized and nested folders retain their full path.
 
 - A user can add a bookmark manually without an API key.
 - AI classification failure does not lose the entered bookmark.
+
+### 12a. Sort date-based bookmark folders
+
+- [x] Detect folders named `Даты` or `Dates` case-insensitively.
+- [x] Include bookmarks from every nested subfolder.
+- [x] Offer only existing folders outside the date tree as destinations.
+- [x] Reject AI-created destination names before applying a proposal.
+- [x] Preserve the source hierarchy until the user confirms the scrollable
+  preview.
 
 ## Priority 3: Quality, tests, and release readiness
 

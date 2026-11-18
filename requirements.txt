@@ -1,1 +1,2 @@
 requests
+openai==3.55.1

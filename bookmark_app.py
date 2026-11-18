@@ -13,6 +13,14 @@ from html.parser import HTMLParser
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 import requests
+from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    InternalServerError,
+    RateLimitError,
+)
 
 
 @dataclass(frozen=True)
@@ -92,8 +100,8 @@ class UrlCheckResult:
 @dataclass(frozen=True)
 class AiConfig:
     api_key: str
-    endpoint: str = 'https://api.openai.com/v1/chat/completions'
-    model: str = 'gpt-4o-mini'
+    endpoint: str = 'https://api.openai.com/v1'
+    model: str = 'gpt-6-astra'
     timeout: float = 30
     batch_size: int = 50
     retries: int = 2
@@ -104,11 +112,11 @@ class AiConfig:
             api_key=os.environ.get('OPENAI_API_KEY', '').strip(),
             endpoint=os.environ.get(
                 'BOOKMARK_AI_ENDPOINT',
-                'https://api.openai.com/v1/chat/completions',
+                'https://api.openai.com/v1',
             ).strip(),
             model=os.environ.get(
                 'BOOKMARK_AI_MODEL',
-                'gpt-4o-mini',
+                'gpt-6-astra',
             ).strip(),
             timeout=float(os.environ.get('BOOKMARK_AI_TIMEOUT', '30')),
             batch_size=int(os.environ.get('BOOKMARK_AI_BATCH_SIZE', '50')),
@@ -139,11 +147,22 @@ class AiResponseError(ValueError):
 
 
 class AiOrganizer:
-    def __init__(self, config, session=None):
+    def __init__(self, config, client=None):
         self.config = config
-        self.session = session or requests.Session()
+        base_url = config.endpoint.removesuffix('/chat/completions')
+        self.client = client or OpenAI(
+            api_key=config.api_key,
+            base_url=base_url,
+            timeout=config.timeout,
+            max_retries=0,
+        )
 
-    def classify_batch(self, bookmarks, existing_folder_paths):
+    def classify_batch(
+        self,
+        bookmarks,
+        existing_folder_paths,
+        existing_folders_only=False,
+    ):
         if not self.config.api_key:
             raise ValueError('An AI API key is required.')
         request_items = [
@@ -160,14 +179,28 @@ class AiOrganizer:
             '{"assignments":[{"assignment_key":"...","folder":"Folder Name"}]}. '
             'Every assignment_key from bookmarks must appear exactly once. '
             'Folder names must be concise, non-empty strings. '
-            'Existing folders may be reused.\n'
-            f'Existing folders: {json.dumps(existing_folder_paths)}\n'
-            f'Bookmarks: {json.dumps(request_items)}'
+            + (
+                'The folder must exactly match one of Existing folders; '
+                'do not invent a new folder.\n'
+                if existing_folders_only
+                else 'Existing folders may be reused.\n'
+            )
+            + f'Existing folders: {json.dumps(existing_folder_paths)}\n'
+            + f'Bookmarks: {json.dumps(request_items)}'
         )
 
         content = self._request_content(prompt)
         payload = self._parse_json_content(content)
-        return self._validate_assignments(payload, bookmarks)
+        assignments = self._validate_assignments(payload, bookmarks)
+        if existing_folders_only:
+            allowed = set(existing_folder_paths)
+            invalid = sorted(set(assignments.values()) - allowed)
+            if invalid:
+                raise AiResponseError(
+                    'AI selected a folder that does not exist: '
+                    + ', '.join(invalid[:3])
+                )
+        return assignments
 
     def suggest_folder(self, bookmark, existing_folder_paths):
         assignments = self.classify_batch([bookmark], existing_folder_paths)
@@ -176,63 +209,70 @@ class AiOrganizer:
     def _request_content(self, prompt):
         last_error = None
         for attempt in range(self.config.retries + 1):
+            session_id = None
             try:
-                response = self.session.post(
-                    self.config.endpoint,
-                    headers={
-                        'Authorization': f'Bearer {self.config.api_key}',
-                        'Content-Type': 'application/json',
-                    },
-                    json={
+                stream_context = self.client.beta.agents.sessions.create(
+                    agent={
                         'model': self.config.model,
-                        'temperature': 0.1,
-                        'messages': [
-                            {
-                                'role': 'system',
-                                'content': (
-                                    'You classify bookmarks and return only '
-                                    'strict JSON.'
-                                ),
-                            },
-                            {'role': 'user', 'content': prompt},
-                        ],
+                        'instructions': (
+                            'You classify bookmarks and return only strict '
+                            'JSON. Do not use tools or create files.'
+                        ),
                     },
+                    environment={'type': 'none'},
+                    input=prompt,
+                    stream=True,
                     timeout=self.config.timeout,
-                )
-                status_code = response.status_code
-                if (
-                    status_code in {408, 429}
-                    or isinstance(status_code, int) and status_code >= 500
-                ):
-                    last_error = AiResponseError(
-                        f'AI service returned HTTP {status_code}.'
-                    )
-                    if attempt < self.config.retries:
-                        time.sleep(0.25 * (2 ** attempt))
-                        continue
-                    break
-                response.raise_for_status()
-                response_json = response.json()
-                return response_json['choices'][0]['message']['content']
-            except (requests.Timeout, requests.ConnectionError) as error:
+                ).with_result_collection()
+                with stream_context as stream:
+                    for event in stream:
+                        del event
+                    result = stream.get_final_result()
+                session_id = result.session_id
+                output_text = result.output_text
+                if not isinstance(output_text, str) or not output_text.strip():
+                    raise AiResponseError('AI agent returned no output text.')
+                return output_text
+            except (
+                APITimeoutError,
+                APIConnectionError,
+                RateLimitError,
+                InternalServerError,
+            ) as error:
                 last_error = error
                 if attempt < self.config.retries:
                     time.sleep(0.25 * (2 ** attempt))
                     continue
                 break
-            except (requests.RequestException, KeyError, IndexError, TypeError) as error:
+            except APIStatusError as error:
                 raise AiResponseError(
-                    f'AI request failed: {error.__class__.__name__}.'
+                    f'Agents API request failed with status {error.status_code}.'
                 ) from error
-            except (ValueError, json.JSONDecodeError) as error:
-                raise AiResponseError('AI service returned invalid JSON.') from error
+            except (AttributeError, KeyError, TypeError, ValueError) as error:
+                if isinstance(error, AiResponseError):
+                    raise
+                raise AiResponseError(
+                    f'Agents API returned an invalid result: '
+                    f'{error.__class__.__name__}.'
+                ) from error
+            finally:
+                if session_id is not None:
+                    try:
+                        self.client.beta.agents.sessions.delete(session_id)
+                    except (
+                        APITimeoutError,
+                        APIConnectionError,
+                        RateLimitError,
+                        InternalServerError,
+                        APIStatusError,
+                    ):
+                        pass
 
         message = (
-            f'AI request failed after {self.config.retries + 1} attempts: '
+            f'Agents API request failed after '
+            f'{self.config.retries + 1} attempts: '
             f'{last_error.__class__.__name__}.'
         )
-        if isinstance(last_error, AiResponseError):
-            message = str(last_error)
         raise AiResponseError(message)
 
     @staticmethod
@@ -493,6 +533,30 @@ class BookmarkStore:
                         for bookmark in path_folder.iter_bookmarks()
                     )
         return protected
+
+    def date_folder_paths(self):
+        names = {'dates', 'даты'}
+        return [
+            path
+            for path, folder in self._iter_folder_locations()
+            if path[-1].casefold() in names
+            and folder is not None
+        ]
+
+    def bookmarks_under_paths(self, source_paths):
+        sources = {tuple(path) for path in source_paths}
+        bookmarks = []
+        for path, folder in self._iter_folder_locations():
+            if any(path[:len(source)] == source for source in sources):
+                bookmarks.extend(folder.bookmarks)
+        return bookmarks
+
+    @staticmethod
+    def is_path_within(path, parent_paths):
+        return any(
+            tuple(path[:len(parent)]) == tuple(parent)
+            for parent in parent_paths
+        )
 
     def has_normalized_url(self, url):
         normalized = normalize_bookmark_url(url)
@@ -984,6 +1048,12 @@ class BookmarkApp:
             command=self.ai_group_bookmarks
         )
         self.ai_group_btn.pack(side=tk.LEFT, padx=5)
+        self.sort_dates_btn = tk.Button(
+            toolbar,
+            text='Sort Dates',
+            command=self.ai_sort_dates
+        )
+        self.sort_dates_btn.pack(side=tk.LEFT, padx=5)
         self.cancel_ai_btn = tk.Button(
             toolbar,
             text='Cancel AI',
@@ -1010,6 +1080,7 @@ class BookmarkApp:
             self.check_urls_btn,
             self.settings_btn,
             self.ai_group_btn,
+            self.sort_dates_btn,
             self.add_bookmark_btn,
         ]
         toolbar_buttons = [
@@ -1584,7 +1655,7 @@ class BookmarkApp:
             return
         endpoint = simpledialog.askstring(
             'AI Settings',
-            'OpenAI-compatible endpoint:',
+            'OpenAI API base URL:',
             initialvalue=self.ai_config.endpoint
         )
         if endpoint is None:
@@ -1693,6 +1764,100 @@ class BookmarkApp:
             ),
         )
 
+    def ai_sort_dates(self):
+        if not self.ai_config.api_key:
+            messagebox.showerror(
+                'Sort Dates',
+                'Set OPENAI_API_KEY or configure an API key in AI Settings.'
+            )
+            return
+
+        source_paths = self.store.date_folder_paths()
+        if not source_paths:
+            messagebox.showinfo(
+                'Sort Dates',
+                'No folder named "Даты" or "Dates" was found.'
+            )
+            return
+        bookmarks = self.store.bookmarks_under_paths(source_paths)
+        if not bookmarks:
+            messagebox.showinfo(
+                'Sort Dates',
+                'The Dates folder tree contains no bookmarks.'
+            )
+            return
+
+        destination_paths = [
+            path
+            for path in self.store.folder_paths
+            if not self.store.is_path_within(path, source_paths)
+            and not self._is_protected_folder_path(path, self.store)
+        ]
+        folder_names = [' / '.join(path) for path in destination_paths]
+        if not folder_names:
+            messagebox.showinfo(
+                'Sort Dates',
+                'Create at least one destination folder outside the Dates tree.'
+            )
+            return
+
+        if not messagebox.askyesno(
+            'Sort Dates with AI',
+            (
+                f'Classify {len(bookmarks)} bookmark(s) from '
+                f'{len(source_paths)} Dates folder(s) into one of '
+                f'{len(folder_names)} existing folders?\n\n'
+                'No new folders will be created. The original data is unchanged '
+                'until you approve the preview.'
+            )
+        ):
+            return
+
+        service = AiOrganizer(self.ai_config)
+        source_store = BookmarkStore.from_dict(self.store.to_dict())
+        self._cancel_ai.clear()
+        self._set_busy(True, 'AI sorting Dates bookmarks...')
+        self.cancel_ai_btn.config(state=tk.NORMAL)
+
+        def worker(report_progress):
+            assignments = {}
+            failures = []
+            batches = [
+                bookmarks[start:start + self.ai_config.batch_size]
+                for start in range(
+                    0,
+                    len(bookmarks),
+                    self.ai_config.batch_size
+                )
+            ]
+            for index, batch in enumerate(batches, start=1):
+                if self._cancel_ai.is_set():
+                    break
+                try:
+                    assignments.update(
+                        service.classify_batch(
+                            batch,
+                            folder_names,
+                            existing_folders_only=True,
+                        )
+                    )
+                except (AiResponseError, ValueError) as error:
+                    failures.append((index, error))
+                report_progress((index, len(batches), len(assignments)))
+            return source_store, assignments, failures, self._cancel_ai.is_set()
+
+        self.run_background(
+            worker,
+            on_success=self._preview_ai_grouping,
+            on_error=self._ai_grouping_failed,
+            on_progress=lambda progress: self.status.config(
+                text=(
+                    f'Sorting Dates batch {progress[0]}/{progress[1]}: '
+                    f'{progress[2]} classified.'
+                )
+            ),
+        )
+
     def cancel_ai_grouping(self):
         self._cancel_ai.set()
         self.cancel_ai_btn.config(state=tk.DISABLED)
@@ -1743,10 +1908,7 @@ class BookmarkApp:
         )
         if len(preview) > 3000:
             preview = preview[:3000] + '\n...'
-        if messagebox.askyesno(
-            'Review AI Organization',
-            preview + '\n\nApply this organization?'
-        ):
+        if self._confirm_ai_preview(preview):
             self.store = proposed_store
             self.refresh_bookmark_views()
             self.status.config(
@@ -1754,6 +1916,86 @@ class BookmarkApp:
             )
         else:
             self.status.config(text='AI grouping proposal was not applied.')
+
+    def _confirm_ai_preview(self, preview):
+        dialog = tk.Toplevel(self.root)
+        dialog.title('Review AI Organization')
+        dialog.transient(self.root)
+        dialog.geometry('700x460')
+        dialog.minsize(500, 320)
+        dialog.resizable(True, True)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+
+        tk.Label(
+            dialog,
+            text='Review the proposed organization, then choose Apply or Cancel.',
+            anchor=tk.W,
+            justify=tk.LEFT,
+            padx=12,
+            pady=10,
+        ).grid(row=0, column=0, sticky=tk.EW)
+
+        text_frame = tk.Frame(dialog, padx=12)
+        text_frame.grid(row=1, column=0, sticky=tk.NSEW)
+        text_frame.columnconfigure(0, weight=1)
+        text_frame.rowconfigure(0, weight=1)
+
+        text_widget = tk.Text(
+            text_frame,
+            wrap=tk.WORD,
+            width=80,
+            height=20,
+            takefocus=True,
+        )
+        text_widget.grid(row=0, column=0, sticky=tk.NSEW)
+        scrollbar = tk.Scrollbar(
+            text_frame,
+            orient=tk.VERTICAL,
+            command=text_widget.yview,
+        )
+        scrollbar.grid(row=0, column=1, sticky=tk.NS)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        text_widget.insert(tk.END, preview)
+        text_widget.configure(state=tk.DISABLED)
+
+        decision = {'apply': False}
+
+        def finish(apply):
+            decision['apply'] = apply
+            dialog.destroy()
+
+        button_frame = tk.Frame(dialog, pady=10)
+        button_frame.grid(row=2, column=0, sticky=tk.E)
+        tk.Button(
+            button_frame,
+            text='Cancel',
+            width=12,
+            command=lambda: finish(False),
+        ).pack(side=tk.RIGHT, padx=(5, 12))
+        tk.Button(
+            button_frame,
+            text='Apply',
+            width=12,
+            command=lambda: finish(True),
+        ).pack(side=tk.RIGHT, padx=5)
+
+        dialog.protocol('WM_DELETE_WINDOW', lambda: finish(False))
+        dialog.bind('<Escape>', lambda event: self._finish_preview(
+            event, finish, False
+        ))
+        dialog.bind('<Return>', lambda event: self._finish_preview(
+            event, finish, True
+        ))
+        dialog.grab_set()
+        text_widget.focus_set()
+        self.root.wait_window(dialog)
+        return decision['apply']
+
+    @staticmethod
+    def _finish_preview(event, finish, apply):
+        del event
+        finish(apply)
 
     def _ai_grouping_failed(self, error):
         self.cancel_ai_btn.config(state=tk.DISABLED)
