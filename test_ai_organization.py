@@ -101,7 +101,7 @@ class AiOrganizerTests(unittest.TestCase):
             }]),
         ]
 
-        with patch('bookmark_app.time.sleep'):
+        with patch('backend.core.time.sleep'):
             result = self.organizer.classify_batch([self.bookmark], [])
 
         self.assertEqual(result['bookmark-1'], 'Python')

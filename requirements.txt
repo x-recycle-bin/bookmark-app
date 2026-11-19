@@ -1,2 +1,5 @@
 requests
 openai==3.55.1
+fastapi
+uvicorn
+python-multipart

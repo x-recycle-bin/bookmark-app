@@ -103,8 +103,8 @@ bookmarks are uncategorized and nested folders retain their full path.
 - [x] Support creating, renaming, and deleting folders.
 - [x] Support assigning a bookmark by double-click/context menu and moving it
   between folders.
-- [x] Use the documented double-click/menu-based alternative instead of
-  platform-dependent Tkinter drag-and-drop.
+- [x] Support bookmark-only Tkinter drag-and-drop plus button/menu-based
+  movement; folders are managed through controls.
 - [x] Keep the Bookmarks bar visible and protected from AI reclassification
   and destructive organization.
 
@@ -114,6 +114,15 @@ bookmarks are uncategorized and nested folders retain their full path.
   without an API key.
 - Moving or deleting a folder does not silently lose bookmarks.
 - The folder view stays synchronized with the underlying model.
+
+The UI was subsequently consolidated into a single expanded `Treeview`:
+
+- [x] Remove the separate bookmark list pane.
+- [x] Support extended multiple selection for folders and bookmarks.
+- [x] Drag selected bookmarks onto destination folders; folder drag-and-drop is
+  intentionally disabled.
+- [x] Add bookmark create, edit, view, and delete controls.
+- [x] Support bulk moving and deleting multiple bookmarks or folders.
 
 ### 6. Add duplicate detection and resolution
 
@@ -314,6 +323,140 @@ bookmarks are uncategorized and nested folders retain their full path.
 - The README does not advertise a feature that is still disabled or
   unimplemented.
 
+## Priority 4: Vue and Docker migration
+
+Migrate the UI without rewriting proven bookmark, AI, URL-validation, or
+export logic unnecessarily. Keep the Tkinter application working until the
+web application reaches feature parity.
+
+### 17. Define the application boundary and migration strategy
+
+- [x] Extract bookmark domain models, parsing, persistence, organization,
+  validation, AI integration, and HTML export into backend modules independent
+  of Tkinter.
+- [x] Define the REST API and asynchronous job/event contract before building
+  the Vue frontend.
+- [x] Reuse the existing versioned bookmark schema and conversion logic.
+- [x] Add a migration/import command for existing JSON backups.
+- [x] Define parity gates before removing the Tkinter entry point.
+
+**Acceptance criteria**
+
+- Backend behavior is testable without Tkinter or a browser.
+- Existing JSON data can be loaded by the migrated application without loss.
+- The migration can stop at any gate without breaking the working Tkinter app.
+
+### 18. Build the FastAPI backend
+
+- [x] Create a FastAPI application for bookmark and folder CRUD.
+- [x] Add import, HTML export, duplicate detection, URL checking, AI grouping,
+  and Dates sorting endpoints.
+- [x] Run long AI and URL operations as jobs and report progress through
+  Server-Sent Events or WebSockets.
+- [x] Keep the OpenAI key on the backend; never expose it to Vue.
+- [x] Validate request bodies, operation results, and all file uploads.
+- [x] Add cancellation, timeout, retry, and safe partial-result behavior.
+
+**Acceptance criteria**
+
+- Every existing application operation is available through the API.
+- API contract tests run offline.
+- No endpoint returns a success response when work or persistence failed.
+
+### 19. Build the Vue application
+
+- [ ] Create a Vue 3 and TypeScript frontend using Vite.
+- [ ] Build a full-width hierarchical folder/bookmark tree.
+- [ ] Preserve extended multi-selection for bookmarks and folders.
+- [ ] Support bookmark-only drag-and-drop onto destination folders.
+- [ ] Add bookmark and folder CRUD, move, duplicate review, AI preview, URL
+  review, import, save/load, and export interfaces.
+- [ ] Show persistent status, progress, cancellation, and recoverable errors.
+- [ ] Provide keyboard navigation and accessible dialog behavior.
+- [ ] Keep large bookmark collections responsive through virtualization or
+  incremental rendering if needed.
+
+**Acceptance criteria**
+
+- The Vue UI reaches feature parity with the validated Tkinter workflows.
+- Multi-selection and bookmark drag-and-drop work without folder dragging.
+- AI and URL jobs show progress without freezing the interface.
+
+### 20. Add internal data persistence
+
+- [ ] Save the active bookmark workspace inside the application's managed
+  storage instead of requiring an export after every session.
+- [ ] Start with versioned JSON storage for single-user operation, with an
+  abstraction that can later use SQLite or PostgreSQL.
+- [ ] Load the last active workspace automatically at startup.
+- [ ] Save changes atomically and keep a recoverable backup before destructive
+  replacement.
+- [ ] Support manual import/export and workspace migration without exposing
+  container-internal paths to the browser.
+- [ ] Reject malformed or unsupported stored data without overwriting it.
+
+**Acceptance criteria**
+
+- Bookmarks survive application restarts and container recreation.
+- A failed save leaves the previous workspace readable and recoverable.
+- The UI clearly distinguishes internal autosave from explicit export.
+
+### 21. Persist application settings
+
+- [ ] Add a versioned settings schema stored separately from bookmark data.
+- [ ] Persist non-sensitive preferences such as language, model, endpoint,
+  timeout, batch size, retry count, view expansion, and last destination.
+- [ ] Load settings automatically and preserve defaults when fields are absent.
+- [ ] Store the OpenAI API key only through a configured secret store, backend
+  environment variable, or Docker secret; never in browser storage, exports,
+  JSON backups, logs, or committed files.
+- [ ] Add a Settings screen with validation, reset-to-defaults, and restart
+  instructions where required.
+- [ ] Migrate settings safely when the schema version changes.
+
+**Acceptance criteria**
+
+- Non-sensitive settings survive app and container restarts.
+- Secrets are not returned by the API or included in frontend state.
+- Invalid settings fall back visibly without silently discarding valid values.
+
+### 22. Containerize the application
+
+- [ ] Add separate frontend and backend Dockerfiles with non-root runtimes.
+- [ ] Build Vue assets in a dedicated build stage.
+- [ ] Add Docker Compose for the frontend/Nginx, FastAPI backend, and any future
+  database service.
+- [ ] Mount named volumes for managed bookmark data, settings, and backups.
+- [ ] Use Docker secrets or environment files for AI credentials.
+- [ ] Add health checks, restart behavior, and log configuration.
+- [ ] Document development, production, backup, restore, and upgrade commands.
+- [ ] Ensure upgrades preserve data while rolling back application versions.
+
+**Acceptance criteria**
+
+- `docker compose up --build` starts the complete application.
+- Data and settings remain available after container recreation.
+- No API key or user bookmark data is included in an image layer.
+
+### 23. Add web migration tests and release gates
+
+- [ ] Add backend unit and integration tests for all migrated operations.
+- [ ] Add Vue component tests for selection, CRUD, drag-and-drop, and dialogs.
+- [ ] Add browser end-to-end coverage for import, organize, AI preview,
+  autosave, restart persistence, and HTML export.
+- [ ] Add Docker smoke tests, health checks, and volume persistence tests.
+- [ ] Verify migration from representative Tkinter JSON backups.
+- [ ] Compare export output and core workflows against the Tkinter application.
+- [ ] Document the supported browser matrix and filesystem upload/download
+  limitations.
+
+**Acceptance criteria**
+
+- API, frontend, Docker, and persistence tests pass offline except explicitly
+  isolated live-service checks.
+- Restarting the application restores both data and settings.
+- The Vue/Docker release is feature-equivalent before Tkinter is retired.
+
 ## Recommended implementation order
 
 1. Complete tasks 1-4 to establish a stable, testable application core.
@@ -321,6 +464,9 @@ bookmarks are uncategorized and nested folders retain their full path.
 3. Complete task 13 early enough to test each core change as it lands.
 4. Complete tasks 9 and 14, then add AI through tasks 10-12.
 5. Finish tasks 15-16 before calling the application release-ready.
+6. Complete tasks 17-18 before building the Vue client.
+7. Complete tasks 19-21, then containerize and test through tasks 22-23.
+8. Retire Tkinter only after the Vue/Docker parity gates pass.
 
 ## Definition of done
 
@@ -332,3 +478,6 @@ bookmarks are uncategorized and nested folders retain their full path.
 - [ ] Failed I/O, malformed input, API failures, and network failures leave the
   active session usable.
 - [ ] README behavior and the implemented behavior match.
+- [ ] The web migration preserves all bookmarks and settings across restarts.
+- [ ] Docker volumes and backup/restore procedures are tested.
+- [ ] Vue/Docker reaches documented feature parity before Tkinter is removed.

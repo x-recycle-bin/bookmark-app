@@ -16,7 +16,8 @@ A powerful Python application for organizing and managing browser bookmarks with
 
 ### 🔧 Management Tools
 - **URL Validation**: Check links concurrently and review failed URLs before removal
-- **Manual Organization**: Move bookmarks by double-click or the Move Bookmark control
+- **Manual Organization**: Multi-select bookmarks and folders, move bookmarks
+  with buttons or drag-and-drop, and manage folders with controls
 - **Folder Management**: Create, rename, and organize bookmark folders
 - **Duplicate Detection**: Identify and handle duplicate bookmarks
 
@@ -66,9 +67,17 @@ Export your current bookmarks:
 1. Open Bookmark Organizer
 2. Click "Import Bookmarks" and select your HTML file
 3. Review imported bookmarks
-4. Create or rename folders and double-click a bookmark to move it
+4. Create or rename folders, then move bookmarks with the Move Bookmark
+   control or drag-and-drop
 5. Use Duplicates to choose how matching URLs are handled
 6. The Bookmarks bar remains visible and cannot be renamed or deleted
+
+Bookmarks now appear directly inside the expanded folder tree. Use Ctrl/Shift
+selection for multiple bookmarks or folders, drag selected bookmarks onto a
+destination folder, or use **Move Bookmark**. Folder drag-and-drop is disabled.
+Double-click a bookmark to edit
+it; **Add Bookmark**, **Edit Bookmark**, and **Delete Bookmark** provide full
+bookmark management.
 
 ### Step 3: Export & Import
 1. Click "Export HTML" to generate organized bookmark file
@@ -123,7 +132,12 @@ The app organizes bookmarks into logical folders such as:
 
 ```
 bookmark-app/
+├── backend/
+│   ├── core.py                   # Tkinter-independent models and services
+│   ├── persistence.py            # Versioned atomic JSON persistence
+│   └── api_contract.py           # REST and async job contracts
 ├── bookmark_app.py              # Main application
+├── migrate_backup.py            # Legacy JSON migration command
 ├── requirements.txt             # Python dependencies
 ├── short_bookmarks.html         # Sample bookmark file
 ├── test_*.py                    # Offline unit and GUI smoke tests
@@ -136,6 +150,25 @@ Run the complete test suite:
 ```bash
 py -m unittest discover -v
 ```
+
+Migrate an existing bookmark backup to the current internal schema:
+
+```bash
+py migrate_backup.py existing_backup.json migrated_workspace.json
+```
+
+The command validates the source and writes the normalized, versioned workspace
+atomically. It does not modify the source file.
+
+Start the FastAPI backend:
+
+```bash
+py -m uvicorn backend.api:app --reload
+```
+
+The API contract is available at `http://127.0.0.1:8000/docs`. Workspace data
+defaults to `data/workspace.json`; set `BOOKMARK_WORKSPACE_FILE` to use another
+local path or a mounted Docker volume.
 
 This test demonstrates:
 - ✅ HTML bookmark parsing (105 bookmarks processed)

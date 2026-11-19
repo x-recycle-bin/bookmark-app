@@ -172,6 +172,45 @@ class BookmarkModelTests(unittest.TestCase):
         self.assertEqual(store.folders[0].bookmarks, [first, second])
         self.assertEqual(store.folders[1].bookmarks, [])
 
+    def test_bulk_bookmark_crud_operations_keep_assignments_unique(self):
+        first = Bookmark('First', 'https://first.example', assignment_key='first')
+        second = Bookmark('Second', 'https://second.example', assignment_key='second')
+        store = BookmarkStore(uncategorized=[first, second])
+        store.create_folder('Target')
+
+        self.assertEqual(
+            store.move_bookmarks(['first', 'second'], ('Target',)),
+            2,
+        )
+        updated = store.update_bookmark(
+            'first',
+            'Updated',
+            'https://updated.example',
+        )
+        self.assertEqual(updated.assignment_key, 'first')
+        self.assertEqual(updated.title, 'Updated')
+        self.assertEqual(store.remove_bookmarks(['first']), 1)
+        self.assertEqual(store.bookmarks, [second])
+
+    def test_folder_drag_move_prevents_cycles_and_toolbar_moves(self):
+        toolbar = BookmarkFolder(
+            name='Toolbar',
+            is_bookmarks_bar=True,
+        )
+        nested = BookmarkFolder(name='Nested')
+        parent = BookmarkFolder(name='Parent', children=[nested])
+        target = BookmarkFolder(name='Target')
+        store = BookmarkStore(folders=[toolbar, parent, target])
+
+        store.move_folder(('Target',), ('Parent',))
+        self.assertEqual(parent.children, [nested, target])
+        with self.assertRaisesRegex(ValueError, 'inside itself'):
+            store.move_folder(('Parent',), ('Parent', 'Nested'))
+        with self.assertRaisesRegex(ValueError, 'cannot be moved'):
+            store.move_folder(('Toolbar',), ('Parent',))
+        with self.assertRaisesRegex(ValueError, 'Bookmarks bar'):
+            store.move_folder(('Parent', 'Nested'), ('Toolbar',))
+
 
 if __name__ == '__main__':
     unittest.main()
